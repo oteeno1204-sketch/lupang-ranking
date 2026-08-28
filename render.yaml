@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: lupang-ranking-browser
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://lupang.expo.app
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "20"
