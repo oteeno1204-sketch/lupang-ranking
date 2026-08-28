@@ -1,6 +1,7 @@
 import { chromium } from 'playwright';
 import { parseMobiLifeJson, parseMobiLifeText } from './mobilife-parser.mjs';
 import { buildMobiLifeRankingUrl } from './mobilife-lookup-utils.mjs';
+import { isMobiLifeSearchPending, compactDiagnosticText } from './mobilife-diagnostics.mjs';
 
 let browserPromise = null;
 
@@ -21,10 +22,12 @@ export async function lookupOfficialRanking(characterName, { timeoutMs = 25000 }
   page.setDefaultTimeout(timeoutMs);
   let found = null;
   const pendingResponses = new Set();
+  const responseUrls = [];
 
   const onResponse = (response) => {
     if (found) return;
     const contentType = response.headers()['content-type'] ?? '';
+    if (responseUrls.length < 20) responseUrls.push(`${response.status()} ${response.url()} [${contentType || 'unknown'}]`);
     if (!contentType.includes('json')) return;
     const task = (async () => {
       try {
@@ -56,12 +59,36 @@ export async function lookupOfficialRanking(characterName, { timeoutMs = 25000 }
     } catch {
       // Ranking page can keep background connections open; continue with captured responses and DOM.
     }
-    await page.waitForTimeout(1200);
+
+    const settleDeadline = Date.now() + Math.min(timeoutMs, 20000);
+    let bodyText = '';
+    while (Date.now() < settleDeadline) {
+      if (pendingResponses.size) await Promise.allSettled([...pendingResponses]);
+      if (found) return found;
+      try {
+        bodyText = await page.locator('body').innerText({ timeout: 3000 });
+      } catch {
+        bodyText = '';
+      }
+      const parsed = parseMobiLifeText(bodyText, characterName);
+      if (parsed) return parsed;
+      if (!isMobiLifeSearchPending(bodyText)) break;
+      await page.waitForTimeout(750);
+    }
+
     if (pendingResponses.size) await Promise.allSettled([...pendingResponses]);
     if (found) return found;
+    if (!bodyText) bodyText = await page.locator('body').innerText({ timeout: 5000 });
+    const parsed = parseMobiLifeText(bodyText, characterName);
+    if (parsed) return parsed;
 
-    const bodyText = await page.locator('body').innerText({ timeout: 5000 });
-    return parseMobiLifeText(bodyText, characterName);
+    console.info('mobilife lookup miss', JSON.stringify({
+      characterName,
+      pageUrl: page.url(),
+      responses: responseUrls,
+      body: compactDiagnosticText(bodyText, 1600),
+    }));
+    return null;
   } finally {
     page.off('response', onResponse);
     await context.close();
