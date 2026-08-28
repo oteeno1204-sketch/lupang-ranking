@@ -1,7 +1,7 @@
 import { chromium } from 'playwright';
-import { parseOfficialRankingHtml } from './parser.mjs';
+import { parseMobiLifeJson, parseMobiLifeText } from './mobilife-parser.mjs';
+import { buildMobiLifeRankingUrl } from './mobilife-lookup-utils.mjs';
 
-const RANKING_PAGE = 'https://mabinogimobile.nexon.com/Ranking/List?t=4';
 let browserPromise = null;
 
 async function browserInstance() {
@@ -9,23 +9,7 @@ async function browserInstance() {
   return browserPromise;
 }
 
-async function fetchRankDataInPage(page, characterName, contentType) {
-  return await page.evaluate(async ({ name, type }) => {
-    const payload = { t: 4, pageno: 1, s: 2, c: 0, search: name };
-    const body = type === 'application/json'
-      ? JSON.stringify(payload)
-      : new URLSearchParams(Object.entries(payload).map(([key, value]) => [key, String(value)])).toString();
-    const response = await fetch('/Ranking/List/rankdata', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'content-type': type, 'x-requested-with': 'XMLHttpRequest', accept: 'text/html,*/*;q=0.8' },
-      body,
-    });
-    return { ok: response.ok, status: response.status, text: await response.text() };
-  }, { name: characterName, type: contentType });
-}
-
-export async function lookupOfficialRanking(characterName, { timeoutMs = 20000 } = {}) {
+export async function lookupOfficialRanking(characterName, { timeoutMs = 25000 } = {}) {
   const browser = await browserInstance();
   const context = await browser.newContext({
     locale: 'ko-KR',
@@ -35,21 +19,51 @@ export async function lookupOfficialRanking(characterName, { timeoutMs = 20000 }
   });
   const page = await context.newPage();
   page.setDefaultTimeout(timeoutMs);
+  let found = null;
+  const pendingResponses = new Set();
+
+  const onResponse = (response) => {
+    if (found) return;
+    const contentType = response.headers()['content-type'] ?? '';
+    if (!contentType.includes('json')) return;
+    const task = (async () => {
+      try {
+        const payload = await response.json();
+        const parsed = parseMobiLifeJson(payload, characterName);
+        if (parsed) found = parsed;
+      } catch {
+        // Ignore non-JSON or already-consumed responses; DOM fallback runs below.
+      }
+    })();
+    pendingResponses.add(task);
+    task.finally(() => pendingResponses.delete(task));
+  };
+
+  page.on('response', onResponse);
   try {
-    const landing = await page.goto(RANKING_PAGE, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    const landing = await page.goto(buildMobiLifeRankingUrl(characterName), {
+      waitUntil: 'domcontentloaded',
+      timeout: timeoutMs,
+    });
     if (!landing || landing.status() >= 400) {
-      const error = new Error(`공식 랭킹 페이지를 열지 못했습니다. (${landing?.status() ?? 0})`);
+      const error = new Error(`모비라이프 랭킹 페이지를 열지 못했습니다. (${landing?.status() ?? 0})`);
       error.code = 'UPSTREAM_BLOCKED';
       throw error;
     }
-    for (const contentType of ['application/json', 'application/x-www-form-urlencoded']) {
-      const result = await fetchRankDataInPage(page, characterName, contentType);
-      if (!result.ok) continue;
-      const stats = parseOfficialRankingHtml(result.text, characterName);
-      if (stats) return stats;
+
+    try {
+      await page.waitForLoadState('networkidle', { timeout: Math.min(timeoutMs, 12000) });
+    } catch {
+      // Ranking page can keep background connections open; continue with captured responses and DOM.
     }
-    return null;
+    await page.waitForTimeout(1200);
+    if (pendingResponses.size) await Promise.allSettled([...pendingResponses]);
+    if (found) return found;
+
+    const bodyText = await page.locator('body').innerText({ timeout: 5000 });
+    return parseMobiLifeText(bodyText, characterName);
   } finally {
+    page.off('response', onResponse);
     await context.close();
   }
 }
