@@ -1,0 +1,10 @@
+$ErrorActionPreference = 'Stop'
+
+Write-Host 'Lupang PWA 공식 넥슨 랭킹 서버 배포 준비'
+Write-Host '1) 이 폴더의 파일들을 GitHub 저장소 oteeno1204-sketch/lupang-ranking 루트에 덮어씁니다.'
+Write-Host '2) main 브랜치에 Commit/Push 합니다.'
+Write-Host '3) Render Auto Deploy가 자동으로 새 배포를 시작합니다.'
+Write-Host ''
+Write-Host '로컬 검증:'
+Write-Host '  npm install'
+Write-Host '  npm test'
